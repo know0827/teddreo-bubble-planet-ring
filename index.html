@@ -1411,7 +1411,7 @@ function rebuildRing(){
     /* 碎星圈:真正的立體閃亮點,而非僅靠貼圖模擬;呈現在戒指厚度側邊(戒圈左右兩側的側面),
        而非戒圈外側表面 —— 每顆星點沿著側面的徑向範圍(從內緣到外緣)與整圈角度隨機灑落,
        左右兩側各半,轉動時每顆的反光角度都不同,才會有「很多顆星星在戒指側邊閃閃發亮」的真實感 */
-    const n = 130;
+        const n = 200;
     const sparkGeo = new THREE.SphereGeometry(Math.max(0.045, visualHalfWidth*0.045), 6, 6);
     for(let i=0;i<n;i++){
       const isGold = Math.random()<0.3;
