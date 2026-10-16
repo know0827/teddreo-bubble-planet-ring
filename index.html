@@ -1071,8 +1071,8 @@ function buildRingGeometry(shapeKey, halfWidth, halfThick, mainRadius){
    頂點各自依照其局部 x 座標換算成戒圈圓周上的角度(弧長近似),再取該角度上戒圈表面
    實際的半徑(含花邊波浪起伏)+ 凸出量,得到彎曲貼合戒圈弧度的星芒,而不是一片硬挺的平板。
    size/longSize 仍以「弦長」概念給值,對這個尺寸範圍的星芒來說與弧長的差異可忽略。 */
-function curvedStarGeometry(size, longSize, mainRadius, halfThick, pop, waveFn, baseAngle, spikeCount){
-  const spikes = spikeCount || 6, outer = size, inner = size*0.45;
+function curvedStarGeometry(size, longSize, mainRadius, halfThick, pop, waveFn, baseAngle, spikeCount, innerRatio, rot){
+  const spikes = spikeCount || 6, outer = size, inner = size*(innerRatio || 0.45);
   const corners = []; // 星芒外圍 12 個角點(局部座標)
   for(let i=0;i<spikes*2;i++){
     let r;
@@ -1081,7 +1081,7 @@ function curvedStarGeometry(size, longSize, mainRadius, halfThick, pop, waveFn, 
     } else {
       r = inner;
     }
-    const a = (Math.PI/spikes)*i;
+    const a = (Math.PI/spikes)*i + (rot||0);
     corners.push({x:Math.cos(a)*r, y:Math.sin(a)*r});
   }
   const mapPoint = (x,y) => {
@@ -1119,6 +1119,36 @@ function bandPoint(angleDeg, mainRadius, halfThick, outwardPop, widthOffset){
   const u = THREE.MathUtils.degToRad(angleDeg);
   const rad = mainRadius + halfThick + (outwardPop||0);
   return new THREE.Vector3(rad*Math.cos(u), rad*Math.sin(u), widthOffset||0);
+}
+
+/* 貼合戒圈弧面的圓盤/圓環(泡泡壓印用):局部座標 x 沿戒圈切線、y 沿戒圈寬度,
+   (cx,cy) 為圓心偏移;rInner>0 時為圓環。取點方式與 curvedStarGeometry 的 mapPoint 相同 */
+function curvedDiscGeometry(rOuter, rInner, cx, cy, mainRadius, halfThick, pop, waveFn, baseAngle){
+  const SEG = 24;
+  const mapPoint = (x,y) => {
+    const theta = baseAngle + x/mainRadius;
+    const wave = waveFn ? waveFn(theta) : 0;
+    const radial = mainRadius + halfThick + wave + pop;
+    return new THREE.Vector3(radial*Math.cos(theta), radial*Math.sin(theta), y);
+  };
+  const positions = [];
+  const push = v => positions.push(v.x,v.y,v.z);
+  for(let i=0;i<SEG;i++){
+    const a1 = (i/SEG)*Math.PI*2, a2 = ((i+1)/SEG)*Math.PI*2;
+    const o1 = mapPoint(cx+Math.cos(a1)*rOuter, cy+Math.sin(a1)*rOuter);
+    const o2 = mapPoint(cx+Math.cos(a2)*rOuter, cy+Math.sin(a2)*rOuter);
+    if(rInner>0){
+      const i1 = mapPoint(cx+Math.cos(a1)*rInner, cy+Math.sin(a1)*rInner);
+      const i2 = mapPoint(cx+Math.cos(a2)*rInner, cy+Math.sin(a2)*rInner);
+      push(o1);push(o2);push(i1); push(o2);push(i2);push(i1);
+    } else {
+      push(mapPoint(cx,cy));push(o1);push(o2);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions,3));
+  geo.computeVertexNormals();
+  return geo;
 }
 
 /* ---- 表面工藝紋理:依照亮面/古法霧面/拉絲/滿天星特色分別繪製 ---- */
@@ -1430,6 +1460,106 @@ function rebuildRing(){
     ringGroup.add(starMesh);
   }
 
+
+  /* 滿圈壓印(參考實品照片):沿戒圈外側一整圈,疏密不均地散落著——
+     細長尖銳的四芒星(部分一軸拉長成閃光狀)、細瘦的六/八芒星、粗圓環加亮點的泡泡,
+     以及大量細小圓點穿插其間。位置在戒面寬度內隨機散落(不再上下交錯成規律排列),
+     用簡單的碰撞檢查確保彼此不重疊;偽隨機使用固定種子,每次重繪排列一致。
+     避開主石與六芒星所在的區域,以及外側刻字的弧線 */
+  {
+    const waveFnP = (viewShape==='deco') ? decoWaveOffset : null;
+    const unit = visualHalfWidth*0.88;           /* 紋樣基準半徑(星星直徑約為戒面寬度的一半) */
+    const popP = 0.006;
+    let seed = 20261016;
+    const rnd = ()=>{ seed = (seed*1664525 + 1013904223) % 4294967296; return seed/4294967296; };
+    const R = MAIN_RADIUS_MM, circ = Math.PI*2*R;
+    const gemZone = (visualHalfWidth*2.7)/R + 0.16;
+    let engraveLo = null, engraveHi = null;
+    if(state.engraveOuterOn && state.engraveOuterText){
+      const tipOff = (visualHalfWidth*2.7)/R;
+      const arcR = engraveArcRadians(R + halfThick + 0.3, visualHalfWidth*1.3);
+      const ctr = Math.PI/2 - tipOff - 0.004 - arcR/2;
+      engraveLo = ctr - arcR/2 - 0.08; engraveHi = ctr + arcR/2 + 0.08;
+    }
+    const arcDist = (s1,s2)=>{ const d = Math.abs(s1-s2)%circ; return d>circ/2 ? circ-d : d; };
+    const placed = [];
+    const fits = (sx,z,r,gap)=> placed.every(q=> Math.hypot(arcDist(sx,q.s), z-q.z) >= (r+q.r)*gap);
+    const items = [];
+
+    /* 第一批:大圖案(泡泡/四芒星/多芒星) */
+    const BIG = 20;
+    let bigCount = 0;
+    for(let t=0; t<500 && bigCount<BIG; t++){
+      const aRoll = rnd(), zRoll = rnd(), kRoll = rnd(), scRoll = rnd(), rotRoll = rnd(), fRoll = rnd();
+      const kind = kRoll<0.3 ? 'bubble' : (kRoll<0.65 ? 'star4' : 'starN');
+      const sc = 0.6 + scRoll*0.4;
+      const r = unit*sc*(kind==='bubble' ? 0.9 : (kind==='star4' ? 1.2 : 1.0));
+      const room = visualHalfWidth*0.9 - r;
+      if(room < 0) continue;
+      const sx = aRoll*circ, z = (zRoll*2-1)*room;
+      if(!fits(sx,z,r,1.25)) continue;
+      placed.push({s:sx, z, r});
+      items.push({kind, sx, z, sc, r, rotRoll, fRoll});
+      bigCount++;
+    }
+    /* 第二批:細小圓點,穿插在圖案之間 */
+    const DOTS = 40;
+    let dotCount = 0;
+    for(let t=0; t<900 && dotCount<DOTS; t++){
+      const aRoll = rnd(), zRoll = rnd(), rRoll = rnd();
+      const r = unit*(0.1 + rRoll*0.08);
+      const room = visualHalfWidth*0.92 - r;
+      const sx = aRoll*circ, z = (zRoll*2-1)*room;
+      if(!fits(sx,z,r,1.35)) continue;
+      placed.push({s:sx, z, r});
+      items.push({kind:'dot', sx, z, sc:1, r});
+      dotCount++;
+    }
+
+    const pats = [];
+    const addShifted = (geo, dz)=>{
+      const arr = geo.getAttribute('position').array.slice();
+      if(dz) for(let k=2;k<arr.length;k+=3) arr[k] += dz;
+      pats.push(arr);
+    };
+    items.forEach(it=>{
+      const ang = it.sx / R;                     /* 0 ~ 2π */
+      let d = Math.abs(ang - Math.PI/2); if(d>Math.PI) d = Math.PI*2 - d;
+      if(d < gemZone) return;
+      if(engraveLo!==null){
+        let a2 = ang; if(a2 > Math.PI*1.5) a2 -= Math.PI*2;
+        if(a2 >= engraveLo && a2 <= engraveHi) return;
+      }
+      const sc = it.sc;
+      if(it.kind==='dot'){
+        addShifted(curvedDiscGeometry(it.r, 0, 0, 0, R, halfThick, popP, waveFnP, ang), it.z);
+      } else if(it.kind==='bubble'){
+        addShifted(curvedDiscGeometry(unit*0.9*sc, unit*0.58*sc, 0, 0, R, halfThick, popP, waveFnP, ang), it.z);
+        addShifted(curvedDiscGeometry(unit*0.15*sc, 0, -unit*0.28*sc, unit*0.28*sc, R, halfThick, popP, waveFnP, ang), it.z);
+      } else if(it.kind==='star4'){
+        /* 細長閃光狀四芒星:一軸拉長、微微傾斜 */
+        const rot = (it.rotRoll-0.5)*0.5;
+        const longTip = it.fRoll<0.6 ? unit*sc*1.2*1.45 : 0;
+        addShifted(curvedStarGeometry(unit*sc*1.2, longTip, R, halfThick, popP, waveFnP, ang, 4, 0.2, rot), it.z);
+      } else {
+        const spikes = it.fRoll<0.5 ? 6 : 8;
+        const rot = (it.rotRoll-0.5)*Math.PI*0.4;
+        addShifted(curvedStarGeometry(unit*sc*1.0, 0, R, halfThick, popP, waveFnP, ang, spikes, 0.36, rot), it.z);
+      }
+    });
+    let total = 0; pats.forEach(a=>total+=a.length);
+    const merged = new Float32Array(total); let off = 0;
+    pats.forEach(a=>{ merged.set(a, off); off += a.length; });
+    const imprintGeo = new THREE.BufferGeometry();
+    imprintGeo.setAttribute('position', new THREE.BufferAttribute(merged,3));
+    imprintGeo.computeVertexNormals();
+    /* 不受環境反射與燈光影響的材質,顯示的就是指定的淺灰藍 */
+    const imprintMat = new THREE.MeshBasicMaterial({
+      color:0xc6cace, side:THREE.DoubleSide,
+      polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2
+    });
+    ringGroup.add(new THREE.Mesh(imprintGeo, imprintMat));
+  }
 
   if(state.starCount==='yes'){
     /* 碎星圈:真正的立體閃亮點,而非僅靠貼圖模擬;呈現在戒指厚度側邊(戒圈左右兩側的側面),
